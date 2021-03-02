@@ -1,0 +1,255 @@
+---
+title: "bootstrap, nonlinear least squares, awesome gt table"
+author: "Anastasia Kunz"
+date: "3/1/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(here)
+library(boot)
+library(gt)
+library(patchwork)
+library(broom)
+library(nlstools)
+library(devtools)
+
+```
+
+## Part 1: fun beautiful tables with gt
+
+we'll use the lifecycle savings built in data set
+
+
+simplify the data to get 5 countries with the lowest savings ration
+
+```{r}
+disp_income <- LifeCycleSavings %>% 
+  rownames_to_column() %>% 
+  arrange(dpi) %>% 
+  head(5) %>% 
+  mutate(ddpi = ddpi / 100,
+         pop15 = pop15 / 100,
+         pop75 = pop75 / 100) # to make it a decimal so that we can later make it a percent
+  
+```
+
+using gt:
+
+- Percent variables (ddpi, pop15 and pop75) should be in percent format
+- Per capita disposable income (dpi) should be as dollars
+- Color of dpi cells should change based on value
+
+
+```{r}
+disp_income %>% 
+  gt() %>% 
+  tab_header(
+    title = "Life cycle savings", 
+    subtitle = "5 countries with the lowest per capita disposable income"
+  ) %>% 
+  fmt_currency( # reformat to currency notation
+    columns = vars(dpi),
+    decimals = 1
+    ) %>% 
+  fmt_percent(
+    columns = vars(pop15, pop75, ddpi),
+    decimals = 1
+  ) %>% 
+  fmt_number(
+    columns= vars(sr),
+    decimals = 1
+  ) %>% 
+  tab_options(table.width = pct(80)) %>% 
+  tab_footnote(
+    footnote = "Data averaged from 1970 - 1980",
+    location = cells_title()
+  ) %>% 
+  data_color(
+    columns = vars(dpi),
+    colors = scales::col_numeric(
+      palette = c("orange", "red", "purple"),
+      domain = c(120,190) #scale endpoints (outside will be gray)
+    )
+  ) %>% 
+  cols_label(
+    sr= "Savings Ratio",
+    pop15 = "Pop <15yr",
+    pop75 = "pop < 75yr",
+    dpi = "disposable income $ per capita",
+    ddpi = "disposable percent"
+  )
+
+
+
+```
+
+
+## part 2: bootstrapping
+
+sampling with replacement to find sampling distribution that is based on more than a single sample. 
+
+we will bootstrap a 95% confidence interval for the mean salinity of river discharge in Pamlico Sound NC (data exists in boot package)
+
+```{r}
+hist(salinity$sal)
+mean(salinity$sal)
+t.test(salinity$sal) # get the 95% confidence interval for the ttest
+
+```
+
+
+ALWAYS ask questions: 
+
+- How are the data distributed? 
+- Do we think the mean is a valid metric for central tendency?
+- What is our sample size?
+- Outliers? Anomalies? 
+- What assumptions do we make if we find the CI based on a single sample using the t-distribution here? 
+
+### Now to bootstrap the mean salinity
+
+we will bootstrap the mean salinity by first creating a function to calculate the mean for each of our bootstrap samples
+
+```{r}
+#first create the function that will calculate the mean of each bootstrapped sample
+mean_fun <- function (x,i) {mean(x[i])}
+
+#then get just the vector of salinity (salnity$sal)
+sal_nc <- salinity$sal
+
+# now make 100 bootstrap samples by resampling from the salinity vector (sal_nc), using the function created above to calculate the mean of each
+salboot_100 <- boot(sal_nc,
+                    statistic = mean_fun,
+                    R = 100)
+
+salboot_10k <- boot(sal_nc,
+                    statistic = mean_fun,
+                    R = 10000)
+
+salboot_100
+salboot_10k
+
+```
+
+can use t0 to see original sample mean of the boot strap samples
+
+```{r}
+# use the $t0 element fromt he boot output to see the orgiginal sample mean and $t to see the bootstrap samples
+salboot_100$t0
+salboot_100$t
+
+# make vectors of bootstrap sample means a data frame so we can plot it with ggplot
+
+salboot_100_df <- data.frame(bs_mean = salboot_100$t)
+salboot_10k_df <- data.frame(bs_mean = salboot_10k$t)
+
+p1 <- ggplot(data = salinity, aes(x = sal))+
+  geom_histogram()
+
+p2 <- ggplot(data= salboot_100_df, aes(x = bs_mean))+
+  geom_histogram()
+
+p3 <- ggplot(data = salboot_10k_df, aes(x = bs_mean))+
+  geom_histogram()
+
+(p1 + p2 + p3) & theme_minimal()
+```
+
+finding confidence interval
+
+```{r}
+boot.ci(salboot_10k, conf = 0.95)
+```
+
+## Part 3: nonlinear least squares
+
+```{r}
+df <- read_csv(here("data", "log_growth.csv"))
+
+ggplot(data = df, aes(x = time, y = pop))+
+  geom_point()+
+  theme_minimal()+
+  labs(
+    x = "time (hr)",
+    y = "population (ind)"
+  )
+
+#look at log transformed data
+ggplot(data = df, aes(x = time, y = log(pop)))+
+  geom_point()+
+  theme_minimal()+
+  labs(
+    x = "time (hr)",
+    y = "ln(population)"
+  )
+
+```
+
+
+$P(t)=\frac{K}{1+Ae^{-kt}}$
+
+where
+- $K$ is the carrying capacity
+- $A$ is $\frac{K-P_0}{P_0}$
+- $k$ is the growth rate constant
+
+### find inital estimates for K A and k
+
+```{r}
+df_exp <- df %>% 
+  filter(time < 15) %>% 
+  mutate(ln_pop = log(pop))
+
+#model linear to get k estimate ((the slope of this linear eq is an estimate of the growth rate constant))
+
+lm_k <- lm(ln_pop ~ time, data = df_exp)
+lm_k
+
+# coeffiecent (k) = about 0.166 or 0.17
+```
+
+have estimate for k (0.17) and can estimate K at about 180 and A at about 17
+
+Non linear least squares:
+```{r}
+df_nls <- nls(pop ~ K/(1 + A*exp(-r*time)),
+              data = df,
+              start = list(K = 180, A = 17, r = 0.17),
+              trace = TRUE
+              )
+
+summary(df_nls)
+
+model_outputs <- broom::tidy(df_nls)
+
+A_est <- model_outputs$estimate[2]
+```
+
+```{r}
+p_predict <- predict(df_nls)
+
+df_complete <- data.frame(df, p_predict)
+
+ggplot(data = df_complete, aes(x = time, y = pop))+
+  geom_point()+
+  geom_line(aes(x = time, y = p_predict))+
+  theme_minimal()
+
+
+
+```
+
+find confidence intervals for parameter estimates
+
+```{r}
+df_ci <- confint2(df_nls)
+df_ci
+```
+
+
+
+
+
